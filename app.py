@@ -13,12 +13,12 @@ from PIL import Image, UnidentifiedImageError
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import google.generativeai as genai
 import requests
-from ultralytics import YOLO 
+import base64
+from groq import Groq
+
 # ========== GLOBAL CONFIG ==========
 API_KEY = os.getenv("OPENROUTER_API_KEY")
-
 # System-level instruction for the chatbot and recommendation generation.
 # This prompt instructs the model to return short, point-wise answers.
 SYSTEM_PROMPT = (
@@ -214,21 +214,15 @@ MODEL_PATH = r"model.tflite"
 CLASSES_PATH = r"class_indices.json"
 IMAGE_SIZE = (224, 224)
 API_KEY = os.getenv("OPENROUTER_API_KEY") # <-- replace with your OpenRouter key
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+groq_client = Groq(api_key=GROQ_API_KEY)
 
 # Load class indices and TFLite model
 try:
-    leaf_detector = YOLO("best.pt")     # Your downloaded YOLO model
-    print("✅ Leaf detector loaded.")
-except Exception as e:
-    print("❌ Error loading leaf detector:", e)
-    leaf_detector = None
-try:
-    # Load class indices
     with open(CLASSES_PATH, "r") as f:
         class_indices = json.load(f)
     idx_to_class = {int(v): k for k, v in class_indices.items()}
 
-    # Load TFLite model
     interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
     interpreter.allocate_tensors()
     print("✅ Disease model loaded.")
@@ -247,22 +241,56 @@ def preprocess_image(image: Image.Image) -> np.ndarray:
 
 
 # ======================================================
-# 4️⃣ YOLO LEAF DETECTION
+# 4️⃣ GROQ LEAF DETECTION (WORKING & FIXED)
 # ======================================================
-def detect_leaf(image):
+def detect_leaf_groq(image_bytes: bytes) -> bool:
     """
-    Returns True if YOLO detects a leaf, else False.
+    Converts uploaded image to JPEG + Base64 before sending to Groq.
+    Handles Groq Vision model properly (no dict access).
     """
     try:
-        results = leaf_detector.predict(image, conf=0.50)
-        boxes = results[0].boxes
+        # Re-encode image to clean JPEG
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=95)
+        jpeg_bytes = buffer.getvalue()
 
-        if boxes is None or len(boxes) == 0:
-            return False
-        return True
+        # Convert to Base64
+        img_b64 = base64.b64encode(jpeg_bytes).decode()
+
+        # Groq Scout Vision Call
+        completion = groq_client.chat.completions.create(
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text":
+                                "Does this image contain a plant leaf? Reply strictly YES or NO."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{img_b64}"
+                            }
+                        }
+                    ],
+                }
+            ],
+            max_completion_tokens=10,
+        )
+
+        # 🟢 FIXED PART — correct way to read output
+        result = completion.choices[0].message.content.strip().upper()
+
+        print("Groq Leaf Detection →", result)
+
+        return "YES" in result
 
     except Exception as e:
-        print("YOLO detection error:", e)
+        print("Groq Vision Error:", e)
         return False
 
 
@@ -277,48 +305,46 @@ def predict_disease(interpreter, input_array, idx_to_class):
     interpreter.invoke()
 
     preds = interpreter.get_tensor(output_details[0]["index"])[0]
-
     idx = int(np.argmax(preds))
+
     return idx_to_class.get(idx, "Unknown"), float(preds[idx]) * 100
 
 
 # ======================================================
-# 6️⃣ OPENROUTER RECOMMENDATION
+# 6️⃣ OPENROUTER TREATMENT RECOMMENDATION
 # ======================================================
 async def get_openrouter_recommendation(disease_name: str) -> str:
     prompt = (
         f"Give simple treatment steps for {disease_name} in farmer-friendly language. "
-        "Use bullet points and put each step on a new line."
+        "Use bullet points and simple wording."
     )
 
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {API_KEY}"
+        "Authorization": f"Bearer {API_KEY}",
     }
     data = {
         "model": "openai/gpt-3.5-turbo",
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt}
-        ]
+            {"role": "system", "content": SYSTEM_PROMPT },
+            {"role": "user", "content": prompt},
+        ],
     }
 
     loop = asyncio.get_event_loop()
 
-    def send_request():
+    def send():
         return requests.post(url, headers=headers, json=data)
 
     try:
-        response = await loop.run_in_executor(None, send_request)
+        response = await loop.run_in_executor(None, send)
         if response.status_code == 200:
-            result = response.json()
-            return result["choices"][0]["message"]["content"].strip()
+            return response.json()["choices"][0]["message"]["content"].strip()
         else:
-            return f"Could not generate recommendation (Error {response.status_code})"
-
+            return f"Recommendation error: {response.status_code}"
     except Exception as e:
-        return f"Could not generate recommendation: {str(e)}"
+        return f"Error generating recommendation: {str(e)}"
 
 
 # ======================================================
@@ -329,36 +355,33 @@ async def predict_disease_api(file: UploadFile = File(...)):
     if interpreter is None:
         raise HTTPException(status_code=500, detail="Disease model not loaded.")
 
-    if leaf_detector is None:
-        raise HTTPException(status_code=500, detail="Leaf detector model not loaded.")
-
     try:
-        # Validate file type
         if not file.content_type.startswith("image/"):
-            raise HTTPException(status_code=400, detail="File must be an image")
+            raise HTTPException(400, "File must be an image")
 
-        contents = await file.read()
+        image_bytes = await file.read()
 
+        # Load image
         try:
-            image = Image.open(io.BytesIO(contents)).convert("RGB")
+            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         except UnidentifiedImageError:
-            raise HTTPException(status_code=400, detail="Invalid image file")
+            raise HTTPException(400, "Invalid image file")
 
-        # Step 1: Detect leaf using YOLO
-        leaf_present = detect_leaf(image)
+        # Step 1: Groq leaf detection
+        leaf_present = detect_leaf_groq(image_bytes)
 
         if not leaf_present:
             return {
                 "status": "error",
                 "leaf_detected": False,
-                "message": "No leaf detected. Upload a clear leaf image."
+                "message": "No leaf detected. Upload a clear leaf image.",
             }
 
         # Step 2: Disease prediction
         input_arr = preprocess_image(image)
         disease, conf = predict_disease(interpreter, input_arr, idx_to_class)
 
-        # Step 3: Get recommendation
+        # Step 3: Recommendations via OpenRouter
         recommendation = await get_openrouter_recommendation(disease)
 
         return {
@@ -366,11 +389,12 @@ async def predict_disease_api(file: UploadFile = File(...)):
             "leaf_detected": True,
             "predicted_disease": disease,
             "confidence": f"{conf:.2f}",
-            "recommendation": recommendation
+            "recommendation": recommendation,
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(500, detail=str(e))
+
 
 # ======================================================
 # ✅ RUN SERVER
