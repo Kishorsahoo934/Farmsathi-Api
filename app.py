@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 import requests
 import base64
 from groq import Groq
+from fpdf import FPDF
 
 # ========== GLOBAL CONFIG ==========
 API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -345,6 +346,29 @@ async def get_openrouter_recommendation(disease_name: str) -> str:
             return f"Recommendation error: {response.status_code}"
     except Exception as e:
         return f"Error generating recommendation: {str(e)}"
+# Added Download Pdf Function
+def generate_farmer_pdf(disease, confidence, recommendation):
+    filename = f"disease_report_{uuid.uuid4().hex}.pdf"
+    pdf = FPDF()
+    pdf.add_page()
+
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 10, "FarmSathi - Disease Report", ln=True, align="C")
+
+    pdf.ln(10)
+    pdf.set_font("Arial", "", 12)
+
+    pdf.multi_cell(0, 10, f"Disease Name: {disease}")
+    pdf.multi_cell(0, 10, f"Confidence: {confidence}%")
+    pdf.ln(5)
+
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 10, "Treatment Recommendation:", ln=True)
+    pdf.set_font("Arial", "", 12)
+    pdf.multi_cell(0, 10, recommendation)
+
+    pdf.output(filename)
+    return filename
 
 
 # ======================================================
@@ -381,8 +405,11 @@ async def predict_disease_api(file: UploadFile = File(...)):
         input_arr = preprocess_image(image)
         disease, conf = predict_disease(interpreter, input_arr, idx_to_class)
 
-        # Step 3: Recommendations via OpenRouter
+        # Step 3: Treatment recommendation
         recommendation = await get_openrouter_recommendation(disease)
+
+        # Step 4: Generate PDF
+        pdf_filename = generate_farmer_pdf(disease, f"{conf:.2f}", recommendation)
 
         return {
             "status": "success",
@@ -390,10 +417,18 @@ async def predict_disease_api(file: UploadFile = File(...)):
             "predicted_disease": disease,
             "confidence": f"{conf:.2f}",
             "recommendation": recommendation,
+            "report_pdf_url": f"/download-report/{pdf_filename}"
         }
 
     except Exception as e:
         raise HTTPException(500, detail=str(e))
+
+@app.get("/download-report/{filename}")
+async def download_report(filename: str):
+    if os.path.exists(filename):
+        return FileResponse(filename, filename="Disease_Report.pdf")
+    return {"error": "File not found"}
+
 # Report Upload Code 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
@@ -403,7 +438,6 @@ from PIL import Image
 import fitz  # PyMuPDF
 import base64
 import uuid
-from fpdf import FPDF
 import os
 import io
 import re
