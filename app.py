@@ -352,23 +352,41 @@ def generate_farmer_pdf(disease, confidence, recommendation):
     pdf = FPDF()
     pdf.add_page()
 
+    # ------------------------------
+    #  Add FarmSathi Logo (Top Right)
+    # ------------------------------
+    logo_path = "logo.jpg"   # update if your path is different
+    if os.path.exists(logo_path):
+        pdf.image(logo_path, x=160, y=8, w=35)   # x moves right, y moves down, w = size
+
+    # ------------------------------
+    #  Title
+    # ------------------------------
     pdf.set_font("Arial", "B", 16)
     pdf.cell(0, 10, "FarmSathi - Disease Report", ln=True, align="C")
 
     pdf.ln(10)
     pdf.set_font("Arial", "", 12)
 
+    # ------------------------------
+    #  Disease + Confidence
+    # ------------------------------
     pdf.multi_cell(0, 10, f"Disease Name: {disease}")
     pdf.multi_cell(0, 10, f"Confidence: {confidence}%")
     pdf.ln(5)
 
+    # ------------------------------
+    #  Treatment Recommendation
+    # ------------------------------
     pdf.set_font("Arial", "B", 14)
     pdf.cell(0, 10, "Treatment Recommendation:", ln=True)
+
     pdf.set_font("Arial", "", 12)
     pdf.multi_cell(0, 10, recommendation)
 
     pdf.output(filename)
     return filename
+
 
 
 # ======================================================
