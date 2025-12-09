@@ -452,8 +452,8 @@ def generate_pdf(text, filename):
 
     # -------- Add FarmSathi Logo (top-right corner) --------
     # Make sure logo.png is in the same folder
-    if os.path.exists("farmsathi.jpg"):
-        pdf.image("farmsathi.jpg", x=160, y=10, w=35)
+    if os.path.exists("logo.jpg"):
+        pdf.image("logo.jpg", x=160, y=10, w=35)
 
     # -------- Title --------
     pdf.set_font("Arial", "B", 16)
