@@ -395,95 +395,137 @@ async def predict_disease_api(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(500, detail=str(e))
 # Report Upload Code 
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import FileResponse
+from groq import Groq
+from fastapi.middleware.cors import CORSMiddleware
+from PIL import Image
+import fitz  # PyMuPDF
+import base64
 import uuid
 from fpdf import FPDF
-from pdf2image import convert_from_bytes
-from fastapi.responses import FileResponse
-import base64
+import os
 import io
 import re
-from PIL import Image
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
 
 # ---------------- Markdown → Plain Text Converter ---------------- #
 def markdown_to_plain(text):
-    text = re.sub(r'^\s*#{1,6}\s*', '', text, flags=re.MULTILINE)      # headings
-    text = re.sub(r'(\*\*|__)(.*?)\1', r'\2', text)                    # bold
-    text = re.sub(r'(\*|_)(.*?)\1', r'\2', text)                       # italic
-    text = re.sub(r'`(.*?)`', r'\1', text)                              # inline code
-    text = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text)                     # links
-    text = re.sub(r'!\[(.*?)\]\(.*?\)', r'\1', text)                    # images
-    text = re.sub(r'^\s*>\s*', '', text, flags=re.MULTILINE)            # blockquotes
-    text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.MULTILINE)        # lists
-    text = re.sub(r'^\s*([-*_]){3,}\s*$', '', text, flags=re.MULTILINE)# horizontal rules
+    # Remove headings (#, ##, ###, etc.)
+    text = re.sub(r'^\s*#{1,6}\s*', '', text, flags=re.MULTILINE)
+    # Remove bold (**text** or __text__)
+    text = re.sub(r'(\*\*|__)(.*?)\1', r'\2', text)
+    # Remove italic (*text* or _text_)
+    text = re.sub(r'(\*|_)(.*?)\1', r'\2', text)
+    # Remove inline code `text`
+    text = re.sub(r'`(.*?)`', r'\1', text)
+    # Remove links [text](url)
+    text = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text)
+    # Remove images ![alt](url)
+    text = re.sub(r'!\[(.*?)\]\(.*?\)', r'\1', text)
+    # Remove blockquotes
+    text = re.sub(r'^\s*>\s*', '', text, flags=re.MULTILINE)
+    # Remove bullet points
+    text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.MULTILINE)
+    # Remove horizontal rules
+    text = re.sub(r'^\s*([-*_]){3,}\s*$', '', text, flags=re.MULTILINE)
+    # Clean empty lines
     text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
     return text.strip()
 
-# ---------------- Helper Functions ---------------- #
+
 def resize_image(img: Image.Image, max_size=(1024, 1024)):
     img.thumbnail(max_size)
     return img
 
+
 def encode_pil_image(img: Image.Image):
-    buffered = io.BytesIO()
-    img.save(buffered, format="PNG")
-    return base64.b64encode(buffered.getvalue()).decode("utf-8")
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
 
 def generate_pdf(text, filename):
     pdf = FPDF()
     pdf.add_page()
+
+    # -------- Add FarmSathi Logo (top-right corner) --------
+    # Make sure logo.png is in the same folder
+    if os.path.exists("farmsathi.jpg"):
+        pdf.image("farmsathi.jpg", x=160, y=10, w=35)
+
+    # -------- Title --------
     pdf.set_font("Arial", "B", 16)
     pdf.cell(0, 10, "FarmSathi - Crop Treatment Report", ln=True, align="C")
     pdf.ln(10)
 
+    # -------- Treatment Text --------
     pdf.set_font("Arial", "", 12)
     pdf.multi_cell(0, 10, text)
+
     pdf.output(filename)
     return filename
 
-# ---------------- Upload & Generate PDF Endpoint ---------------- #
+
+
+def convert_pdf_to_image(pdf_bytes):
+    """Convert first PDF page to a PIL image using PyMuPDF."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page = doc.load_page(0)
+    pix = page.get_pixmap(dpi=120)
+    img_bytes = pix.tobytes("png")
+    img = Image.open(io.BytesIO(img_bytes))
+    return img
+
+
 @app.post("/upload-report")
 async def upload_report(file: UploadFile = File(...)):
     try:
-        # Handle image or PDF
+        # ---------------- Read File ---------------- #
         if file.content_type.startswith("image/"):
             img = Image.open(file.file)
+
         elif file.content_type == "application/pdf":
             pdf_bytes = await file.read()
-            pages = convert_from_bytes(pdf_bytes, dpi=120)
-            img = pages[0]
+            img = convert_pdf_to_image(pdf_bytes)
+
         else:
             raise HTTPException(status_code=400, detail="Upload must be PDF or Image.")
 
-        # Resize and encode image
+        # ---------------- Resize & Encode ---------------- #
         img = resize_image(img)
         img_b64 = encode_pil_image(img)
 
-        # Groq prompt
+        # ---------------- Send to Groq ---------------- #
         prompt_text = (
             "You are an expert agronomist. I will provide you an image of a crop leaf. "
             "Analyze the image carefully and identify the disease affecting the plant. "
             "Then provide a short and clear treatment advice suitable for a farmer. "
-            "The advice should include: disease name, key symptoms, and 3–5 simple steps. "
-            "Keep it simple and farmer-friendly."
+            "Include: disease name, key symptoms, and 3–5 simple steps. "
+            "Keep it farmer-friendly."
         )
 
         response = client.chat.completions.create(
             model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt_text},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
-                ],
-            }],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {"type": "image_url",
+                         "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
+                    ],
+                }
+            ],
         )
 
         treatment_raw = response.choices[0].message.content
 
-        # Convert Markdown → Plain Text
+        # ---------------- Convert Markdown → Plain Text ---------------- #
         treatment_text = markdown_to_plain(treatment_raw)
 
-        # Generate PDF
+        # ---------------- Generate Final PDF ---------------- #
         output_pdf = f"treatment_{uuid.uuid4().hex}.pdf"
         generate_pdf(treatment_text, output_pdf)
 
