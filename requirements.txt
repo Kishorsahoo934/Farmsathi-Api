@@ -12,3 +12,6 @@ asyncio
 groq
 aiofiles
 pydantic
+PyMuPDF
+fpdf
+
