@@ -218,7 +218,7 @@ def detect_leaf_groq(image_bytes: bytes) -> bool:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Does this image contain a plant leaf? Reply strictly YES or NO."},
+                        {"type": "text", "text": "Analyze the given image carefully. Does it contain a real, physical plant leaf? Ignore diagrams, text, icons, or any artificial/graphic elements. Reply strictly with YES or NO."},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
                     ],
                 }
